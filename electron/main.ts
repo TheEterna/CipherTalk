@@ -1789,11 +1789,7 @@ function registerIpcHandlers() {
 
         const wechatPid = wxKeyService.getWeChatPid() ?? 0
         if (!wechatPid) {
-          logService?.error('ImageKey', '备用方式失败：未找到微信进程')
-          return {
-            success: false,
-            error: (dllResult.error || '获取图片密钥失败') + '\n\n备用方式需要微信正在运行，请打开微信后重试'
-          }
+          logService?.warn('ImageKey', '微信未运行，备用方式将仅返回 XOR 密钥')
         }
 
         const fallbackResult = await imageKeyService.getImageKeys(
@@ -1803,7 +1799,10 @@ function registerIpcHandlers() {
         )
 
         if (fallbackResult.success) {
-          logService?.info('ImageKey', '备用方式获取密钥成功', { xorKey: fallbackResult.xorKey })
+          logService?.info('ImageKey', '备用方式获取密钥成功', {
+            xorKey: fallbackResult.xorKey,
+            hasAesKey: !!fallbackResult.aesKey
+          })
           return fallbackResult
         }
 

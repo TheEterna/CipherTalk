@@ -402,11 +402,13 @@ class ImageKeyService {
       if (!ciphertext) {
         // 没有 V2 文件，只返回 XOR 密钥
         onProgress?.('未找到 V2 格式模板文件，仅返回 XOR 密钥')
-        return {
-          success: true,
-          xorKey,
-          aesKey: undefined
-        }
+        return { success: true, xorKey, aesKey: undefined }
+      }
+
+      // 微信未运行时跳过内存扫描，直接返回 XOR 密钥
+      if (!wechatPid) {
+        onProgress?.('微信未运行，仅返回 XOR 密钥（V2 图片需打开微信后重新获取）')
+        return { success: true, xorKey, aesKey: undefined }
       }
 
       // 重试机制：最多尝试 3 次，每次间隔 2 秒
@@ -429,10 +431,9 @@ class ImageKeyService {
         }
       }
 
-      return { 
-        success: false, 
-        error: '无法从内存中获取 AES 密钥。\n\n请尝试：\n1. 确保微信已登录\n2. 打开朋友圈查看几张图片\n3. 重新获取密钥' 
-      }
+      // AES 获取失败，至少返回 XOR 密钥（可解密大多数非 V2 图片）
+      onProgress?.('AES 密钥获取失败，已返回 XOR 密钥（V2 图片请打开朋友圈后重试）')
+      return { success: true, xorKey, aesKey: undefined }
     } catch (e) {
       console.error('获取图片密钥失败:', e)
       return { success: false, error: String(e) }

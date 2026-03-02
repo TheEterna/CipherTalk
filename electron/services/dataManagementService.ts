@@ -511,7 +511,28 @@ class DataManagementService {
         if (fs.existsSync(file.decryptedPath!)) {
           try {
             fs.renameSync(file.decryptedPath!, backupPath)
-          } catch (e) {
+          } catch (e: any) {
+            if (e?.code === 'EBUSY' || e?.code === 'EPERM') {
+              // 文件被其他进程锁定（如微信正在运行），尝试直接覆盖（无备份）
+              try {
+                fs.copyFileSync(tmpPath, file.decryptedPath!)
+                try { fs.unlinkSync(tmpPath) } catch { }
+                successCount++
+                console.warn(`[增量同步] 文件锁定，已直接覆盖（无备份）: ${file.fileName}`)
+                await new Promise(resolve => setTimeout(resolve, 10))
+                continue
+              } catch {
+                // 直接覆盖也失败：FTS 搜索索引不计入失败，其他文件计入失败
+                try { fs.unlinkSync(tmpPath) } catch { }
+                if (isFtsDb) {
+                  console.warn(`[增量同步] FTS 索引锁定已跳过（不影响功能）: ${file.fileName}`)
+                } else {
+                  console.warn(`[增量同步] 文件锁定无法更新，跳过: ${file.fileName}`)
+                  failCount++
+                }
+                continue
+              }
+            }
             console.error(`[增量同步] 备份旧文件失败: ${file.fileName}`, e)
             try { fs.unlinkSync(tmpPath) } catch { }
             failCount++

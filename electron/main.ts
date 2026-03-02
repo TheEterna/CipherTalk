@@ -11,7 +11,7 @@ import { dbPathService } from './services/dbPathService'
 import { wcdbService } from './services/wcdbService'
 import { dataManagementService } from './services/dataManagementService'
 import { imageDecryptService } from './services/imageDecryptService'
-// imageKeyService 已废弃，图片密钥获取现在通过 wxKeyService.getImageKey() 走 DLL 本地扫描
+import { imageKeyService } from './services/imageKeyService'
 import { chatService } from './services/chatService'
 import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
@@ -1781,12 +1781,37 @@ function registerIpcHandlers() {
       event.sender.send('imageKey:progress', '正在从缓存目录扫描图片密钥...')
 
       // 调用 DLL 的 GetImageKey
-      // DLL 会从 kvcomm 缓存目录获取 code（这部分始终正确）
-      // 但 DLL 的 wxid 发现只搜索固定默认路径，用户自定义存储位置时会找错
+      // DLL 会从 kvcomm 缓存目录获取 code（仅搜索默认路径，自定义路径可能失败）
       const dllResult = wxKeyService.getImageKey()
       if (!dllResult.success || !dllResult.json) {
-        logService?.error('ImageKey', 'DLL GetImageKey 失败', { error: dllResult.error })
-        return { success: false, error: dllResult.error || '获取图片密钥失败' }
+        logService?.warn('ImageKey', 'DLL 方式失败，尝试备用方式（扫描图片文件）', { error: dllResult.error })
+        event.sender.send('imageKey:progress', 'DLL 方式失败，正在尝试备用扫描方式...')
+
+        const wechatPid = wxKeyService.getWeChatPid() ?? 0
+        if (!wechatPid) {
+          logService?.error('ImageKey', '备用方式失败：未找到微信进程')
+          return {
+            success: false,
+            error: (dllResult.error || '获取图片密钥失败') + '\n\n备用方式需要微信正在运行，请打开微信后重试'
+          }
+        }
+
+        const fallbackResult = await imageKeyService.getImageKeys(
+          userDir,
+          wechatPid,
+          (msg) => event.sender.send('imageKey:progress', msg)
+        )
+
+        if (fallbackResult.success) {
+          logService?.info('ImageKey', '备用方式获取密钥成功', { xorKey: fallbackResult.xorKey })
+          return fallbackResult
+        }
+
+        logService?.error('ImageKey', '两种方式均失败', { dllError: dllResult.error, fallbackError: fallbackResult.error })
+        return {
+          success: false,
+          error: fallbackResult.error || dllResult.error || '获取图片密钥失败'
+        }
       }
 
       // 解析 JSON 结果

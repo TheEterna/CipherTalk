@@ -33,6 +33,7 @@ interface ExportOptions {
   exportVideos: boolean
   exportEmojis: boolean
   exportVoices: boolean
+  transcribeVoices: boolean
 }
 
 interface ContactExportOptions {
@@ -86,7 +87,8 @@ function ExportPage() {
     exportImages: false,
     exportVideos: false,
     exportEmojis: false,
-    exportVoices: false
+    exportVoices: false,
+    transcribeVoices: false
   })
 
   // 通讯录导出状态
@@ -426,7 +428,8 @@ function ExportPage() {
         exportImages: options.exportImages,
         exportVideos: options.exportVideos,
         exportEmojis: options.exportEmojis,
-        exportVoices: options.exportVoices
+        exportVoices: options.exportVoices,
+        transcribeVoices: options.transcribeVoices
       }
 
       if (options.format === 'chatlab' || options.format === 'chatlab-jsonl' || options.format === 'json' || options.format === 'excel' || options.format === 'html') {
@@ -703,6 +706,17 @@ function ExportPage() {
                     <Mic size={16} style={{ color: 'var(--text-tertiary)' }} />
                     <span>导出语音</span>
                   </label>
+                  <label className="checkbox-item">
+                    <input
+                      type="checkbox"
+                      checked={options.transcribeVoices}
+                      onChange={e => setOptions(prev => ({ ...prev, transcribeVoices: e.target.checked }))}
+                    />
+                    <div className="custom-checkbox"></div>
+                    <FileText size={16} style={{ color: 'var(--text-tertiary)' }} />
+                    <span>语音转文字</span>
+                    <span className="option-hint">需已下载语音模型</span>
+                  </label>
                 </div>
               </div>
 
@@ -960,6 +974,7 @@ function ExportPage() {
               {options.exportVideos && <span> · 含视频</span>}
               {options.exportEmojis && <span> · 含表情</span>}
               {options.exportVoices && <span> · 含语音</span>}
+              {options.transcribeVoices && <span> · 语音转文字</span>}
               {options.exportAvatars && <span> · 含头像</span>}
             </div>
             {exportProgress.total > 0 && (

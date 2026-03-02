@@ -664,6 +664,12 @@
     input[type="checkbox"]:checked+.custom-checkbox::after {
       transform: scale(1) rotate(-45deg);
     }
+
+    .option-hint {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      opacity: 0.7;
+    }
   }
 
   .date-range {

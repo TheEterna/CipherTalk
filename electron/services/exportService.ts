@@ -6,6 +6,7 @@ import Database from 'better-sqlite3'
 import { app } from 'electron'
 import { ConfigService } from './config'
 import { voiceTranscribeService } from './voiceTranscribeService'
+import { voiceTranscribeServiceWhisper } from './voiceTranscribeServiceWhisper'
 import * as XLSX from 'xlsx'
 import { HtmlExportGenerator } from './htmlExportGenerator'
 import { imageDecryptService } from './imageDecryptService'
@@ -92,6 +93,7 @@ export interface ExportOptions {
   exportVideos?: boolean
   exportEmojis?: boolean
   exportVoices?: boolean
+  transcribeVoices?: boolean
   mediaPathMap?: Map<number, string>
 }
 
@@ -2158,6 +2160,7 @@ class ExportService {
 
         // 当导出媒体时，创建会话子文件夹，把文件和媒体都放进去
         const hasMedia = options.exportImages || options.exportVideos || options.exportEmojis || options.exportVoices
+        const needsMediaOrTranscribe = hasMedia || options.transcribeVoices
         const sessionOutputDir = hasMedia ? path.join(outputDir, safeName) : outputDir
         if (hasMedia && !fs.existsSync(sessionOutputDir)) {
           fs.mkdirSync(sessionOutputDir, { recursive: true })
@@ -2165,9 +2168,9 @@ class ExportService {
 
         const outputPath = path.join(sessionOutputDir, `${safeName}${ext}`)
 
-        // 先导出媒体文件，收集路径映射表
+        // 先导出媒体文件（含语音转文字），收集路径映射表
         let mediaPathMap: Map<number, string> | undefined
-        if (hasMedia) {
+        if (needsMediaOrTranscribe) {
           try {
             mediaPathMap = await this.exportMediaFiles(sessionId, safeName, sessionOutputDir, options, (detail) => {
               onProgress?.({
@@ -2450,15 +2453,38 @@ class ExportService {
       }
     } // 结束 typeConditions > 0
 
-    // === 语音导出（独立流程：需要从 MediaDb 读取） ===
+    // === 语音导出 + 语音转文字（独立流程：需要从 MediaDb 读取） ===
     let voiceCount = 0
-    if (options.exportVoices) {
-      const voiceOutDir = path.join(outputDir, 'voices')
-      if (!fs.existsSync(voiceOutDir)) {
+    let transcribeCount = 0
+    if (options.exportVoices || options.transcribeVoices) {
+      const voiceOutDir = options.exportVoices ? path.join(outputDir, 'voices') : ''
+      if (options.exportVoices && voiceOutDir && !fs.existsSync(voiceOutDir)) {
         fs.mkdirSync(voiceOutDir, { recursive: true })
       }
 
-      onDetail?.('正在导出语音消息...')
+      // 检查 STT 模型是否可用
+      let sttAvailable = false
+      if (options.transcribeVoices) {
+        try {
+          const sttMode = this.configService.get('sttMode') || 'cpu'
+          if (sttMode === 'gpu') {
+            const modelType = this.configService.get('whisperModelType') || 'small'
+            const status = await voiceTranscribeServiceWhisper.getModelStatus(modelType as any)
+            sttAvailable = status.exists === true
+          } else {
+            const status = await voiceTranscribeService.getModelStatus()
+            sttAvailable = status.exists === true
+          }
+        } catch (e) {
+          console.error('[Export] 检查 STT 模型状态失败:', e)
+        }
+        if (!sttAvailable) {
+          console.warn('[Export] STT 模型未下载，跳过语音转文字')
+          onDetail?.('语音转文字模型未下载，跳过转文字')
+        }
+      }
+
+      onDetail?.(options.exportVoices ? '正在导出语音消息...' : '正在转写语音消息...')
 
       // 1. 收集所有语音消息的 createTime
       const voiceCreateTimes: number[] = []
@@ -2533,17 +2559,31 @@ class ExportService {
             const total = voiceCreateTimes.length
             for (let idx = 0; idx < total; idx++) {
               const createTime = voiceCreateTimes[idx]
-              const fileName = `${createTime}.wav`
-              const df = this.dateFolder(createTime)
-              const dayDir = path.join(voiceOutDir, df)
-              if (!fs.existsSync(dayDir)) fs.mkdirSync(dayDir, { recursive: true })
-              const destPath = path.join(dayDir, fileName)
 
-              // 已存在则跳过
-              if (fs.existsSync(destPath)) {
-                mediaPathMap.set(createTime, `voices/${df}/${fileName}`)
-                continue
+              // 判断是否需要导出文件和转写
+              const needTranscribe = options.transcribeVoices && sttAvailable &&
+                !voiceTranscribeService.getCachedTranscript(sessionId, createTime)
+              let needExportFile = false
+              let destPath = ''
+              let df = ''
+              let fileName = ''
+
+              if (options.exportVoices) {
+                fileName = `${createTime}.wav`
+                df = this.dateFolder(createTime)
+                const dayDir = path.join(voiceOutDir, df)
+                if (!fs.existsSync(dayDir)) fs.mkdirSync(dayDir, { recursive: true })
+                destPath = path.join(dayDir, fileName)
+
+                if (fs.existsSync(destPath)) {
+                  mediaPathMap.set(createTime, `voices/${df}/${fileName}`)
+                } else {
+                  needExportFile = true
+                }
               }
+
+              // 两者都不需要则跳过
+              if (!needExportFile && !needTranscribe) continue
 
               // 在 MediaDb 中查找 SILK 数据
               let silkData: Buffer | null = null
@@ -2575,21 +2615,45 @@ class ExportService {
 
               if (!silkData) continue
 
-              try {
-                // SILK → PCM → WAV（串行，立即释放）
-                const result = await silkWasm.decode(silkData, 24000)
-                silkData = null // 释放 SILK 数据
-                if (!result?.data) continue
-                const pcmData = Buffer.from(result.data)
-                const wavData = this.createWavBuffer(pcmData, 24000)
-                fs.writeFileSync(destPath, wavData)
-                voiceCount++
-                mediaPathMap.set(createTime, `voices/${df}/${fileName}`)
-              } catch { }
+              // 导出 WAV 文件（24kHz）
+              if (needExportFile) {
+                try {
+                  const result = await silkWasm.decode(silkData, 24000)
+                  if (result?.data) {
+                    const pcmData = Buffer.from(result.data)
+                    const wavData = this.createWavBuffer(pcmData, 24000)
+                    fs.writeFileSync(destPath, wavData)
+                    voiceCount++
+                    mediaPathMap.set(createTime, `voices/${df}/${fileName}`)
+                  }
+                } catch { }
+              }
+
+              // 语音转文字（16kHz）
+              if (needTranscribe) {
+                try {
+                  const result16k = await silkWasm.decode(silkData, 16000)
+                  if (result16k?.data) {
+                    const pcm16k = Buffer.from(result16k.data)
+                    const wav16k = this.createWavBuffer(pcm16k, 16000)
+                    const sttResult = await this.transcribeWavForExport(wav16k, sessionId, createTime)
+                    if (sttResult.success && sttResult.transcript) {
+                      transcribeCount++
+                    }
+                  }
+                } catch (e) {
+                  console.error(`[Export] 语音转文字失败 (createTime=${createTime}):`, e)
+                }
+              }
+
+              silkData = null // 释放 SILK 数据
 
               // 进度日志
               if ((idx + 1) % 10 === 0 || idx === total - 1) {
-                onDetail?.(`语音导出: ${idx + 1}/${total}`)
+                const progressParts: string[] = []
+                if (options.exportVoices) progressParts.push(`语音导出: ${voiceCount}`)
+                if (options.transcribeVoices && sttAvailable) progressParts.push(`已转写: ${transcribeCount}`)
+                onDetail?.(`${progressParts.join(' / ')} (${idx + 1}/${total})`)
               }
             }
 
@@ -2607,10 +2671,43 @@ class ExportService {
     if (videoCount > 0) parts.push(`${videoCount} 个视频`)
     if (emojiCount > 0) parts.push(`${emojiCount} 个表情`)
     if (voiceCount > 0) parts.push(`${voiceCount} 条语音`)
+    if (transcribeCount > 0) parts.push(`${transcribeCount} 条语音转文字`)
     const summary = parts.length > 0 ? `媒体导出完成: ${parts.join(', ')}` : '无媒体文件'
     onDetail?.(summary)
     console.log(`[Export] ${sessionId} ${summary}`)
     return mediaPathMap
+  }
+
+  /**
+   * 导出时语音转文字：检查缓存，未命中则调用 STT 引擎转写
+   */
+  private async transcribeWavForExport(
+    wavData: Buffer,
+    sessionId: string,
+    createTime: number
+  ): Promise<{ success: boolean; transcript?: string; error?: string }> {
+    // 先查缓存
+    const cached = voiceTranscribeService.getCachedTranscript(sessionId, createTime)
+    if (cached) return { success: true, transcript: cached }
+
+    const sttMode = this.configService.get('sttMode') || 'cpu'
+    let result: { success: boolean; transcript?: string; error?: string }
+
+    if (sttMode === 'gpu') {
+      const whisperModelType = this.configService.get('whisperModelType') || 'small'
+      result = await voiceTranscribeServiceWhisper.transcribeWavBuffer(
+        wavData, whisperModelType as any, 'auto'
+      )
+    } else {
+      result = await voiceTranscribeService.transcribeWavBuffer(wavData)
+    }
+
+    // 转写成功，保存缓存
+    if (result.success && result.transcript) {
+      voiceTranscribeService.saveTranscriptCache(sessionId, createTime, result.transcript)
+    }
+
+    return result
   }
 
   private dateFolder(ts: number): string {
